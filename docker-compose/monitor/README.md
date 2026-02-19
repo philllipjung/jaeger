@@ -1,21 +1,43 @@
-# Service Performance Monitoring (SPM) - Service Graph Setup
+# Service Performance Monitoring (SPM) - OpenSearch Backend Setup
 
-This document describes the Service Graph monitoring setup for the WebFlux + Kafka + Spark ML demo application.
+This document describes the SPM monitoring setup using **Option 2: Direct OpenSearch Querying** architecture.
+
+## Architecture Overview
+
+This deployment uses **Option 2 (Direct OpenSearch Querying)** from the [Jaeger SPM documentation](https://www.jaegertracing.io/docs/latest/spm/):
+
+- **No Prometheus required** - Jaeger computes metrics on-the-fly from OpenSearch
+- **No SpanMetrics Connector** - Simpler configuration, no pre-aggregation
+- **Direct OTLP to Jaeger** - Applications send traces directly to Jaeger v2
+- **Single Storage Backend** - OpenSearch stores both traces and metrics data
+
+```
+┌─────────────┐     OTLP      ┌─────────┐     ┌─────────────┐
+│  Apps       │ ────────────> │ Jaeger  │ ──> │ OpenSearch  │
+│ (server1/2) │               │ (v2)    │     │             │
+└─────────────┘               └─────────┘     └─────────────┘
+                                      ^              |
+                                      |              |
+                                      v              v
+                              ┌─────────────┐   ┌──────────────┐
+                              │ Jaeger UI   │   │ OpenSearch   │
+                              │             │   │ Dashboards   │
+                              └─────────────┘   └──────────────┘
+```
 
 ## Quickstart
 
-### Start Monitoring Stack with OpenSearch & Service Graph
+### Start Monitoring Stack (OpenSearch Only)
 
 ```bash
 cd /root/jaeger/docker-compose/monitor
-docker-compose -f docker-compose-opensearch-with-prometheus.yml up -d
+docker-compose -f docker-compose-opensearch.yml up -d
 ```
 
 **Access Points:**
 - **Jaeger UI:** http://localhost:16686
-- **Prometheus:** http://localhost:9090
 - **OpenSearch Dashboards:** http://localhost:5601
-- **OTEL Collector Metrics:** http://localhost:8889/metrics
+- **OpenSearch API:** http://localhost:9200
 
 ## Application Ports
 
@@ -33,33 +55,54 @@ docker-compose -f docker-compose-opensearch-with-prometheus.yml up -d
 
 | Component | Port | Description |
 |-----------|------|-------------|
-| **OTEL Collector** | 4318 | HTTP OTLP Receiver (traces) |
-| **OTEL Collector** | 8889 | Prometheus Metrics Export |
-| **Jaeger UI** | 16686 | Web UI for trace visualization |
-| **Prometheus** | 9090 | Metrics scraping and query |
+| **Jaeger UI** | 16686 | Web UI for trace visualization and SPM metrics |
+| **Jaeger OTLP** | 4317 | gRPC OTLP Receiver (traces) |
+| **Jaeger OTLP** | 4318 | HTTP OTLP Receiver (traces) |
 | **OpenSearch** | 9200 | Search engine for trace storage |
 | **OpenSearch Dashboards** | 5601 | Data visualization UI |
 
-## Service Graph Metrics
+## SPM Metrics (Direct OpenSearch Querying)
 
-The Service Graph Connector analyzes traces and generates metrics showing relationships between services.
+With Option 2 architecture, Jaeger computes metrics on-the-fly from OpenSearch when you query them.
 
 ### Available Metrics
 
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `traces_service_graph_request_total` | Counter | client, server, connection_type, failed | Total request count between services |
-| `traces_service_graph_request_failed_total` | Counter | client, server, connection_type, failed | Failed request count |
-| `traces_service_graph_request_server_seconds` | Histogram | client, server, connection_type, failed | Server-side latency |
-| `traces_service_graph_request_client_seconds` | Histogram | client, server, connection_type, failed | Client-side latency |
+Jaeger SPM provides RED (Rate, Errors, Duration) metrics:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| **Rate** | Counter | Request rate per service/operation |
+| **Errors** | Counter | Error rate per service/operation |
+| **Duration** | Histogram | Latency percentiles (P50, P95, P99) |
+
+### How to Query Metrics
+
+**Via Jaeger UI:**
+1. Navigate to http://localhost:16686
+2. Click the **Monitor** tab
+3. Select services and operations
+4. View RED metrics in real-time
+
+**Via Jaeger HTTP API:**
+```bash
+# Get latency metrics for a service
+curl "http://localhost:16686/api/metrics/latencies?service=server1&quantile=0.95"
+
+# Get call metrics
+curl "http://localhost:16686/api/metrics/calls?service=server1"
+
+# Get error metrics
+curl "http://localhost:16686/api/metrics/errors?service=server1"
+```
 
 ### Connection Types
 
+Service dependencies detected in traces:
 - **Unset:** Direct HTTP/gRPC calls between services
 - `messaging_system`: Kafka messaging
 - `virtual_node`: Uninstrumented services (e.g., external databases)
 
-### Current Service Graph Edges
+### Current Service Dependencies
 
 ```
 user → server1 (virtual_node: client)
@@ -70,37 +113,17 @@ customer → mysql (virtual_node)
 driver → redis (virtual_node)
 ```
 
-### Query Examples
-
-```promql
-# All service graph edges
-traces_service_graph_request_total
-
-# Server1 to Server2 calls
-traces_service_graph_request_total{client="server1", server="server2"}
-
-# Failed requests
-traces_service_graph_request_total{failed="true"}
-
-# Request rate (5min window)
-rate(traces_service_graph_request_total[5m])
-
-# P95 latency
-histogram_quantile(0.95, rate(traces_service_graph_request_server_seconds_bucket[5m]))
-```
-
 ## Configuration Files
 
 | File | Description |
 |------|-------------|
-| `docker-compose-opensearch-with-prometheus.yml` | Full monitoring stack with OpenSearch |
-| `otel-collector-config-connector.yml` | OTEL Collector with Service Graph Connector |
-| `prometheus.yml` | Prometheus scrape targets |
+| `docker-compose-opensearch.yml` | Monitoring stack with OpenSearch backend |
+| `config-spm-opensearch.yaml` | Jaeger v2 configuration (Option 2) |
 | `jaeger-ui.json` | Jaeger UI configuration |
 
 ### Docker Compose File
 
-**File:** `docker-compose-opensearch-with-prometheus.yml`
+**File:** `docker-compose-opensearch.yml`
 
 ```yaml
 services:
@@ -142,32 +165,19 @@ services:
 
   jaeger:
     networks:
-      backend:
-        # This is the host name used in Prometheus scrape configuration.
-        aliases: [ spm_metrics_source ]
+      - backend
     image: jaegertracing/jaeger:${JAEGER_VERSION:-latest}
     volumes:
       - "./jaeger-ui.json:/etc/jaeger/jaeger-ui.json"
       - "../../cmd/jaeger/config-spm-opensearch.yaml:/etc/jaeger/config.yml"
     command: ["--config", "/etc/jaeger/config.yml"]
-    environment:
-      - SPANMETRICS_FLUSH_INTERVAL=${SPANMETRICS_FLUSH_INTERVAL:-60s}
     ports:
       - "16686:16686" # Jaeger UI http://localhost:16686
-      - "8888:8888"
-      - "8889:8889"
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
     depends_on:
       opensearch:
         condition: service_healthy
-
-  prometheus:
-    networks:
-      - backend
-    image: prom/prometheus:v3.9.1@sha256:1f0f50f06acaceb0f5670d2c8a658a599affe7b0d8e78b898c1035653849a702
-    volumes:
-      - "./prometheus.yml:/etc/prometheus/prometheus.yml"
-    ports:
-      - "9090:9090"
 
   microsim:
     networks:
@@ -175,26 +185,9 @@ services:
     image: yurishkuro/microsim:v0.6.0@sha256:fd75a9b3dd1bb4d7d305a562edeac60051a7fec784b898ff7ab834eacc73f41e
     command: "-d 24h -s 500ms"
     environment:
-      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://otel-collector:4318/v1/traces
-    depends_on:
-      - otel-collector
-
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.119.0
-    networks:
-      - backend
-    volumes:
-      - "./otel-collector-config-connector.yml:/etc/otelcol-contrib/config.yaml"
-    command: [--config=/etc/otelcol-contrib/config.yaml]
-    ports:
-      - "4318:4318" # OTLP HTTP
-      - "4319:4319" # OTLP HTTP (alternative)
+      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://jaeger:4318/v1/traces
     depends_on:
       - jaeger
-
-  # NOTE: Jaeger Dependencies (spark-dependencies) is not compatible with OpenSearch 3.5.0
-  # It only supports Elasticsearch up to version 7.x
-  # To enable jaeger-dependency-* metrics, use Elasticsearch 7.x instead of OpenSearch
 
 networks:
   backend:
@@ -208,24 +201,22 @@ volumes:
 
 | Service | Image | Ports | Description |
 |---------|-------|-------|-------------|
-| opensearch | opensearchproject/opensearch:3.5.0 | 9200 | Trace storage |
+| opensearch | opensearchproject/opensearch:3.5.0 | 9200 | Trace & metrics storage |
 | opensearch-dashboards | opensearchproject/opensearch-dashboards:3.5.0 | 5601 | Visualization UI |
-| jaeger | jaegertracing/jaeger:latest | 16686, 8888-8889 | Trace processing & UI |
-| prometheus | prom/prometheus:v3.9.1 | 9090 | Metrics aggregation |
+| jaeger | jaegertracing/jaeger:latest | 16686, 4317-4318 | Trace processing, SPM & UI |
 | microsim | yurishkuro/microsim:v0.6.0 | - | Trace simulator |
-| otel-collector | otel/opentelemetry-collector-contrib:0.119.0 | 4318-4319 | Trace/metrics processing with Service Graph |
 
 ## Known Issues and Solutions
 
-### Issue 1: Server2 gRPC Calls Failing
+### Issue 1: Server2 gRPC Port Configuration
 
 **Symptoms:**
 - `ml.MLJobService/SubmitClassificationJob` spans have ERROR status
 - HTTP 500 errors on `/api/ml/classification`
 
 **Root Cause:**
-gRPC port mismatch. Server1's `MLClassificationClient.java` was configured to use port 9090, but:
-- Port 9090 is used by Prometheus
+gRPC port was misconfigured. Server1's `MLClassificationClient.java` was configured to use port 9090, but:
+- Port 9090 was previously used by Prometheus
 - Server2's gRPC server runs on port 9094
 
 **Solution:**
@@ -234,35 +225,28 @@ Updated `MLClassificationClient.java`:
 private static final int GRPC_SERVER_PORT = 9094;  // Changed from 9090
 ```
 
-### Issue 2: Service Graph Metrics Not Appearing
-
-**Symptoms:**
-- `traces_service_graph_request_total` metrics are empty
-- Service Graph connector logs show "edge completed" but no metrics in Prometheus
-
-**Root Cause:**
-Prometheus was not configured to scrape the OTEL Collector's metrics endpoint.
-
-**Solution:**
-Added OTEL Collector as a Prometheus scrape target in `prometheus.yml`:
+Also updated `/root/webflux-demo/server2/src/main/resources/application.yml`:
 ```yaml
-- job_name: otel-collector
-  static_configs:
-  - targets: ['otel-collector:8889']
+grpc:
+  server:
+    port: 9094  # Changed from 9090
 ```
 
-### Issue 3: Metrics Take 60 Seconds to Appear
+### Issue 2: Metrics Computation On-Demand
 
 **Symptoms:**
-- Generate traces but metrics don't appear in Prometheus immediately
+- Jaeger UI Monitor tab may show "no data" initially
+- Metrics appear to be delayed
 
 **Root Cause:**
-Service Graph Connector has a `metrics_flush_interval: 60s`.
+With Option 2 (direct OpenSearch querying), Jaeger computes metrics on-demand when you query them. This is different from Prometheus which pre-aggregates metrics.
 
 **Solution:**
-Wait at least 60 seconds after generating traces before querying Prometheus.
+- Wait for traces to be indexed in OpenSearch (~5-10 seconds)
+- Refresh the Monitor tab
+- Metrics are computed dynamically from trace data
 
-### Issue 4: jaeger-dependency-* Metrics Not Available
+### Issue 3: jaeger-dependency-* Metrics Not Available
 
 **Symptoms:**
 - `jaeger-dependency-*` metrics don't exist
@@ -271,11 +255,9 @@ Wait at least 60 seconds after generating traces before querying Prometheus.
 Spark-dependencies tool is not compatible with OpenSearch 3.5.0 (only supports Elasticsearch up to 7.x).
 
 **Solution:**
-Use Service Graph Connector instead. It provides the same functionality:
-- `traces_service_graph_request_total` replaces `jaeger-dependency-*`
-- Works with OpenSearch 3.5.0
+Jaeger v2 with SPM provides dependency information through the Service Graph API. Use Jaeger UI or HTTP API to query service dependencies.
 
-## Testing Service Graph
+## Testing SPM Metrics
 
 ### Generate Test Traces
 
@@ -302,102 +284,56 @@ for i in {1..10}; do
 done
 ```
 
-### Verify in Service Graph
+### Verify Metrics in Jaeger
 
-Wait 60 seconds for metrics flush, then query:
+Wait 10-20 seconds for traces to be indexed, then verify:
+
+1. **Check Jaeger UI Monitor Tab:**
+   - Navigate to http://localhost:16686
+   - Click **Monitor** tab
+   - Select services and operations
+   - View RED metrics (Rate, Errors, Duration)
+
+2. **Query via HTTP API:**
 ```bash
-curl -s 'http://localhost:9090/api/v1/query?query=traces_service_graph_request_total'
+# Get latency metrics
+curl "http://localhost:16686/api/metrics/latencies?service=server1&quantile=0.95"
+
+# Get call metrics
+curl "http://localhost:16686/api/metrics/calls?service=server1"
+
+# Get error metrics
+curl "http://localhost:16686/api/metrics/errors?service=server1"
 ```
-
-## Debug Service Graph
-
-### Enable Debug Logging
-
-Edit `otel-collector-config-connector.yml`:
-```yaml
-service:
-  telemetry:
-    logs:
-      level: debug
-```
-
-Restart collector:
-```bash
-docker-compose -f docker-compose-opensearch-with-prometheus.yml restart otel-collector
-```
-
-### Check Service Graph Activity
-
-```bash
-docker logs monitor_otel-collector_1 | grep "edge completed"
-```
-
-Expected output:
-```
-edge completed client_service="server1" server_service="server2"
-```
-
-### View Metrics in Real-Time
-
-```bash
-# OTEL Collector metrics endpoint
-curl -s http://localhost:8889/metrics | grep service_graph
-
-# Prometheus query
-curl -s 'http://localhost:9090/api/v1/query?query=traces_service_graph_request_total'
-```
-
-## Service Graph Connector Configuration
-
-**File:** `otel-collector-config-connector.yml`
-
-Key settings:
-- **Store TTL:** 60s (time to wait for paired spans)
-- **Max Items:** 10000 (maximum unpaired spans to keep)
-- **Metrics Flush Interval:** 60s (how often to emit metrics)
-- **Latency Buckets:** [100ms, 250ms, 1s, 5s, 10s]
 
 ## Visualization
 
-### Jaeger UI
+### Jaeger UI (Primary Interface)
 **URL:** http://localhost:16686
 
+**Search Tab:**
 - View individual traces
-- See service dependencies
-- Filter by service, operation, tags
+- Trace timeline visualization
+- Filter by service, operation, tags, duration
+- View service dependencies
 
-### Prometheus
-**URL:** http://localhost:9090
-
-**Recommended Queries:**
-
-```promql
-# Service graph overview
-traces_service_graph_request_total
-
-# Request rate by service pair
-rate(traces_service_graph_request_total[5m])
-
-# Error rate
-rate(traces_service_graph_request_failed_total[5m]) / rate(traces_service_graph_request_total[5m])
-
-# P95 latency (server-side)
-histogram_quantile(0.95, rate(traces_service_graph_request_server_seconds_bucket[5m]))
-
-# P95 latency (client-side)
-histogram_quantile(0.95, rate(traces_service_graph_request_client_seconds_bucket[5m]))
-```
+**Monitor Tab (SPM):**
+- RED metrics (Rate, Errors, Duration)
+- Latency percentiles (P50, P95, P99)
+- Service-level and operation-level metrics
+- Time range selection
 
 ### OpenSearch Dashboards
 **URL:** http://localhost:5601
 
 - Index patterns: `jaeger-*`
-- Visualize trace data
+- Raw trace data exploration
 - Create custom dashboards
+- Direct OpenSearch queries
 
 ## HTTP API Specification
 
-## Query Metrics
+### Query Metrics
 
 `/api/metrics/{metric_type}?{query}`
 
@@ -453,13 +389,15 @@ spanKindType = 'unspecified' | 'internal' | 'server' | 'client' | 'producer' | '
 
 ## Important Notes
 
-1. **Metrics Flush Interval:** Service graph metrics are emitted every 60 seconds. You must wait at least 60 seconds after generating traces before they appear in Prometheus.
+1. **Metrics Computed On-Demand:** With Option 2 (direct OpenSearch querying), metrics are computed dynamically when you query them. There's no pre-aggregation delay.
 
-2. **Trace Context Propagation:** Service graph edges require both CLIENT and SERVER spans from the same trace (same trace ID) with proper parent-child relationship.
+2. **Trace Indexing:** Traces must be indexed in OpenSearch before metrics can be computed. This typically takes 5-10 seconds.
 
-3. **Virtual Nodes:** Uninstrumented services (databases, caches) appear with `virtual_node` label.
+3. **Trace Context Propagation:** Service dependency edges require both CLIENT and SERVER spans from the same trace (same trace ID) with proper parent-child relationship.
 
-4. **TTL Setting:** The service graph connector has a 60-second TTL. If CLIENT and SERVER spans arrive more than 60 seconds apart, they won't be paired.
+4. **Virtual Nodes:** Uninstrumented services (databases, caches) appear as dependencies in Jaeger UI with appropriate labels.
+
+5. **OTLP Direct:** Applications can send traces directly to Jaeger v2 via OTLP (ports 4317 for gRPC, 4318 for HTTP).
 
 ## Building from Source
 
@@ -473,24 +411,24 @@ make build
 ### Bring up the dev environment
 
 ```bash
-make dev
+docker-compose -f docker-compose-opensearch.yml up
 ```
 
 ## Sending Traces
 
 We will use [tracegen](https://github.com/jaegertracing/jaeger/tree/main/cmd/tracegen)
-to emit traces to the OpenTelemetry Collector which, in turn, will aggregate the trace data into metrics.
+to emit traces directly to Jaeger v2.
 
 Start the local stack needed for SPM, if not already done:
 
 ```shell
-docker-compose -f docker-compose-opensearch-with-prometheus.yml up
+docker-compose -f docker-compose-opensearch.yml up
 ```
 
 Generate a specific number of traces with:
 
 ```shell
-docker run --env OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="http://otel-collector:4318/v1/traces" \
+docker run --env OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="http://jaeger:4318/v1/traces" \
   --network monitor_backend \
   --rm \
   jaegertracing/jaeger-tracegen:latest \
@@ -501,7 +439,7 @@ docker run --env OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="http://otel-collector:4318/
 Or, emit traces over a period of time with:
 
 ```shell
-docker run --env OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="http://otel-collector:4318/v1/traces" \
+docker run --env OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="http://jaeger:4318/v1/traces" \
   --network monitor_backend \
   --rm \
   jaegertracing/jaeger-tracegen:latest \
@@ -518,6 +456,6 @@ Then navigate to the Monitor tab at http://localhost:16686/monitor to view the R
 
 [Service Performance Monitoring (SPM)](https://www.jaegertracing.io/docs/latest/spm/)
 
-[OpenTelemetry Service Graph Connector](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/connector/servicegraphconnector/README.md)
-
 [Jaeger HTTP API](https://www.jaegertracing.io/docs/latest/apis/)
+
+[Jaeger v2 Architecture](https://www.jaegertracing.io/docs/latest/architecture/)

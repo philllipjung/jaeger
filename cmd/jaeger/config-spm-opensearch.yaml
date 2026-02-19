@@ -4,21 +4,10 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [jaeger_storage_exporter, spanmetrics]
-    metrics/spanmetrics:
-      receivers: [spanmetrics]
-      exporters: [prometheus]
+      exporters: [jaeger_storage_exporter]
   telemetry:
     resource:
       service.name: jaeger
-    metrics:
-      level: detailed
-      readers:
-        - pull:
-            exporter:
-              prometheus:
-                host: 0.0.0.0
-                port: 8888
     logs:
       level: DEBUG
 
@@ -35,20 +24,17 @@ extensions:
             - http://opensearch:9200
     metric_backends:
       opensearch_metrics_storage:
-        prometheus:
-          endpoint: http://prometheus:9090
-          normalize_calls: true
-          normalize_duration: true
-
-connectors:
-  spanmetrics:
-    metrics_flush_interval: ${env:SPANMETRICS_FLUSH_INTERVAL:-60s}
+        opensearch:
+          server_urls:
+            - http://opensearch:9200
 
 receivers:
   otlp:
     protocols:
       grpc:
         endpoint: "0.0.0.0:4317"
+      http:
+        endpoint: "0.0.0.0:4318"
 
 processors:
   batch:
@@ -56,5 +42,3 @@ processors:
 exporters:
   jaeger_storage_exporter:
     trace_storage: opensearch_trace_storage
-  prometheus:
-    endpoint: "0.0.0.0:8889"
