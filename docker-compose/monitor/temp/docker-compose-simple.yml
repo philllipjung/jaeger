@@ -1,0 +1,101 @@
+# Docker Compose with Data Prepper + OTEL Collector
+# Minimal setup based on /home/philip/Downloads
+
+services:
+  # OpenSearch
+  opensearch:
+    image: opensearchproject/opensearch:3.5.0@sha256:2f2244c7c0ad3a4a0d09977c2b519977b77bacc92e1eaf995c080c1d22f517b6
+    container_name: opensearch
+    networks:
+      - backend
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - "DISABLE_INSTALL_DEMO_CONFIG=true"
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+      - plugins.security.disabled=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # OpenSearch Dashboards
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:3.5.0
+    container_name: opensearch-dashboards
+    networks:
+      - backend
+    ports:
+      - "5601:5601"
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:v3.9.1
+    container_name: prometheus
+    networks:
+      - backend
+    command:
+      - --config.file=/etc/prometheus.yaml
+      - --web.enable-remote-write-receiver
+    volumes:
+      - ./prometheus-simple.yml:/etc/prometheus.yaml
+    ports:
+      - "9090:9090"
+
+  # Data Prepper
+  data-prepper:
+    image: opensearchproject/data-prepper:latest
+    container_name: data-prepper
+    networks:
+      - backend
+    volumes:
+      - ./data-prepper-pipelines-simple.yaml:/usr/share/data-prepper/pipelines/data-prepper-pipelines.yaml
+      - ./data-prepper-config-simple.yaml:/usr/share/data-prepper/config/data-prepper-config.yaml
+    ports:
+      - "2021:2021"
+      - "21890:21890"
+      - "21891:21891"
+      - "4900:4900"
+    depends_on:
+      - opensearch
+
+  # OTEL Collector with hostmetrics and resource detection
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.131.0
+    container_name: otel-collector
+    networks:
+      - backend
+    user: "0:0"
+    command: ["--config=/etc/otel-collector.yml"]
+    volumes:
+      - ./otel-collector-simple.yml:/etc/otel-collector.yml
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8889:8889"
+    depends_on:
+      - opensearch
+      - data-prepper
+      - prometheus
+
+networks:
+  backend:

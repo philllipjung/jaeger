@@ -1,0 +1,165 @@
+# Data Prepper Pipelines Configuration
+# Based on /home/philip/Downloads/metric_pipeline.yaml
+# Extended with support for traces, metrics, and service map
+
+# ========== METRICS PIPELINE ==========
+metric-pipeline:
+  delay: "100"
+  source:
+    otel_metrics_source:
+      ssl: false
+  processor:
+    - otel_metrics:
+        # Export processed metrics
+        export_processed_metrics: true
+        # Metrics aggregation
+        aggregation:
+          enabled: true
+          interval: 60s
+  buffer:
+    bounded_blocking:
+      buffer_size: 10240
+      batch_size: 160
+  sink:
+    - opensearch:
+        hosts: ["http://opensearch:9200"]
+        insecure: true
+        index: otel_metrics-%{yyyy-MM-dd}
+        # Index settings
+        index_type: metric
+        # Bulk settings
+        bulk_size: 5
+        # Number of workers
+        num_workers: 2
+        # Retry settings
+        max_retries: 3
+        # Compression
+        compression: gzip
+
+# ========== ENTRY PIPELINE (Traces) ==========
+entry-pipeline:
+  delay: "100"
+  source:
+    otel_trace_source:
+      ssl: false
+  buffer:
+    bounded_blocking:
+      buffer_size: 10240
+      batch_size: 160
+  processor:
+    - otel_traces:
+        # Export trace ID
+        export_trace_id: true
+  sink:
+    - pipeline:
+        name: "raw-trace-pipeline"
+    - pipeline:
+        name: "service-map-pipeline"
+
+# ========== RAW TRACE PIPELINE ==========
+raw-trace-pipeline:
+  delay: "100"
+  source:
+    pipeline:
+      name: "entry-pipeline"
+  buffer:
+    bounded_blocking:
+      buffer_size: 10240
+      batch_size: 160
+  processor:
+    - otel_traces:
+        # Process traces
+        process_trace_data: true
+        # Skip quality check
+        skip_quality_check: false
+  sink:
+    - opensearch:
+        hosts: ["http://opensearch:9200"]
+        insecure: true
+        index_type: trace-analytics-raw
+        index: trace-analytics-raw-%{yyyy-MM-dd}
+        # Bulk settings
+        bulk_size: 5
+        num_workers: 2
+        max_retries: 3
+
+# ========== SERVICE MAP PIPELINE ==========
+service-map-pipeline:
+  delay: "100"
+  source:
+    pipeline:
+      name: "entry-pipeline"
+  buffer:
+    bounded_blocking:
+      buffer_size: 10240
+      batch_size: 160
+  processor:
+    - service_map:
+        # Service map settings
+        window_duration: 60s
+        # Export date fields
+        export_date_fields: true
+  sink:
+    - opensearch:
+        hosts: ["http://opensearch:9200"]
+        insecure: true
+        index_type: trace-analytics-service-map
+        index: trace-analytics-service-map-%{yyyy-MM-dd}
+        # Bulk settings
+        bulk_size: 5
+        num_workers: 2
+        max_retries: 3
+
+# ========== LOGS PIPELINE (Optional) ==========
+logs-pipeline:
+  delay: "100"
+  source:
+    otel_logs_source:
+      ssl: false
+  buffer:
+    bounded_blocking:
+      buffer_size: 10240
+      batch_size: 160
+  processor:
+    - otel_logs:
+        # Process logs
+        process_logs: true
+        # Parse JSON logs
+        parse_json: true
+  sink:
+    - opensearch:
+        hosts: ["http://opensearch:9200"]
+        insecure: true
+        index: otel_logs-%{yyyy-MM-dd}
+        # Bulk settings
+        bulk_size: 5
+        num_workers: 2
+        max_retries: 3
+
+# ========== PROMETHEUS METRICS PIPELINE (Optional) ==========
+prometheus-metrics-pipeline:
+  delay: "100"
+  source:
+    prometheus_metrics_source:
+      ssl: false
+  processor:
+    - prometheus:
+        # Process Prometheus metrics
+        export_timestamp: true
+        # Metrics aggregation
+        aggregation:
+          enabled: true
+          interval: 60s
+  buffer:
+    bounded_blocking:
+      buffer_size: 10240
+      batch_size: 160
+  sink:
+    - opensearch:
+        hosts: ["http://opensearch:9200"]
+        insecure: true
+        index: prometheus_metrics-%{yyyy-MM-dd}
+        # Bulk settings
+        bulk_size: 5
+        num_workers: 2
+        max_retries: 3

@@ -1,0 +1,94 @@
+# OTEL Collector Configuration for Jaeger SPM + Data Prepper Setup
+# Traces → Jaeger → OpenSearch (for SPM computation)
+# Metrics → Data Prepper → OpenSearch
+# Logs → OpenSearch
+
+receivers:
+  # Host metrics receiver (CPU, memory, disk, network, etc.)
+  hostmetrics:
+    scrapers:
+      cpu:
+      disk:
+      filesystem:
+      load:
+      memory:
+      network:
+
+  # Docker container stats
+  docker_stats:
+
+  # OTLP receiver for applications (traces, metrics, logs)
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - "http://localhost:4070"
+            - "http://localhost:3000"
+            - "*"
+          allowed_headers:
+            - "*"
+          max_age: 7200
+
+processors:
+  # Batch processing for better performance
+  batch:
+
+  # Resource detection - adds host, system, cloud metadata
+  resourcedetection/env:
+    detectors: [env, system]
+    timeout: 2s
+    override: false
+
+  # Filter out OTEL's own internal traces
+  filter/exclude_otel_exports:
+    traces:
+      span:
+        - 'attributes["url.full"] != nil and IsMatch(attributes["url.full"], ".*opentelemetry.proto.collector.*")'
+
+exporters:
+  # Export traces to Jaeger (for SPM with OpenSearch backend)
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # Export metrics to Data Prepper (sends to OpenSearch)
+  otlp/metrics:
+    endpoint: data-prepper:21891
+    tls:
+      insecure: true
+
+  # Export logs directly to OpenSearch
+  opensearch:
+    http:
+      endpoint: http://opensearch:9200
+      tls:
+        insecure: true
+
+  # Debug exporter (optional - comment out in production)
+  debug:
+    verbosity: normal
+
+service:
+  pipelines:
+    # Traces pipeline: App → OTEL Collector → Jaeger → OpenSearch
+    traces:
+      receivers: [otlp]
+      processors: [batch, resourcedetection/env, filter/exclude_otel_exports]
+      exporters: [otlp/jaeger, debug]
+
+    # Metrics pipeline: Host/Docker/App → OTEL Collector → Data Prepper → OpenSearch
+    metrics:
+      receivers: [hostmetrics, docker_stats, otlp]
+      processors: [resourcedetection/env]
+      exporters: [otlp/metrics]
+
+    # Logs pipeline: App → OTEL Collector → OpenSearch
+    logs:
+      receivers: [otlp]
+      processors: [batch, resourcedetection/env]
+      exporters: [opensearch]

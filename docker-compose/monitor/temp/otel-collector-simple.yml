@@ -1,0 +1,70 @@
+receivers:
+  hostmetrics:
+    scrapers:
+      cpu:
+      disk:
+      filesystem:
+      load:
+      memory:
+      network:
+  docker_stats:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - "http://localhost:4070"
+            - "http://localhost:3000"
+            - "*"
+          allowed_headers:
+            - "*"
+          max_age: 7200
+processors:
+  batch:
+  resourcedetection/env:
+    detectors: [env, system]
+    timeout: 2s
+    override: false
+  filter/exclude_otel_exports:
+    traces:
+      span:
+        - 'attributes["url.full"] != nil and IsMatch(attributes["url.full"], ".*opentelemetry.proto.collector.*")'
+exporters:
+  # Export metrics to Data Prepper
+  otlp/metrics:
+    endpoint: data-prepper:21891
+    tls:
+      insecure: true
+  # Export traces to Data Prepper
+  otlp/traces:
+    endpoint: data-prepper:21890
+    tls:
+      insecure: true
+      insecure_skip_verify: true
+  # Export logs to OpenSearch
+  opensearch:
+    http:
+      endpoint: http://opensearch:9200
+      tls:
+        insecure: true
+  # Debug exporter
+  debug:
+    verbosity: normal
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, resourcedetection/env, filter/exclude_otel_exports]
+      exporters: [opensearch, otlp/traces]
+    metrics:
+      receivers: [hostmetrics, docker_stats, otlp]
+      processors: [resourcedetection/env]
+      exporters: [otlp/metrics]
+    logs:
+      receivers: [otlp]
+      processors: [batch, resourcedetection/env]
+      exporters: [opensearch]
+

@@ -1,0 +1,365 @@
+# OpenTelemetry Collector Configuration
+# Sends metrics to both Prometheus (via Remote Write) and OpenSearch (via Data Prepper)
+
+receivers:
+  # OTLP receiver for traces, metrics, and logs
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - "http://localhost:4070"
+            - "http://localhost:3000"
+            - "http://localhost:5173"
+            - "*"
+          allowed_headers:
+            - "*"
+          max_age: 7200
+
+  # Host Metrics Receiver - collects system-level metrics
+  hostmetrics:
+    collection_interval: 10s
+    scrapers:
+      cpu:
+      disk:
+      filesystem:
+      load:
+      memory:
+      network:
+      # Process scraper - collects metrics about running processes
+      #process:
+      #  metrics:
+      #    - process.cpu.time
+      #    - process.memory.usage
+      #    - process.runtime.memory
+
+  # Docker Stats Receiver - collects container metrics
+  docker_stats:
+    endpoint: /var/run/docker.sock
+    container_annotations_to_labels:
+      - key: "io.kubernetes.container.name"
+        label: "k8s_container_name"
+      - key: "io.kubernetes.pod.name"
+        label: "k8s_pod_name"
+    collection_interval: 10s
+
+  # Prometheus Receiver - scrape Prometheus-format metrics
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'otel-collector'
+          scrape_interval: 10s
+          static_configs:
+            - targets: ['localhost:8888']
+        - job_name: 'opensearch'
+          scrape_interval: 30s
+          static_configs:
+            - targets: ['opensearch:9200']
+          metrics_path: '/_prometheus/metrics'
+
+processors:
+  # Batch processor - batches telemetry data before sending
+  batch:
+    timeout: 5s
+    send_batch_size: 10240
+    send_batch_max_size: 20480
+
+  # Resource Detection Processor - detects and adds resource attributes
+  resourcedetection:
+    detectors:
+      # Environment variable detector
+      env:
+        # OTEL_RESOURCE_ATTRIBUTES="service.name=my-service,service.version=1.0.0"
+      # System detector - detects hostname, OS info
+      system:
+      # EC2 detector - detects AWS EC2 metadata
+      #ec2:
+      # GCE detector - detects GCE metadata
+      #gce:
+      # Azure detector - detects Azure VM metadata
+      #azure:
+    timeout: 5s
+    override: false
+
+  # Memory Limiter - prevents OOM by limiting memory usage
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  # Resource Processor - adds/updates resource attributes
+  resource:
+    attributes:
+      # Add cluster name
+      - key: cluster.name
+        value: "monitoring-stack"
+        action: upsert
+      # Add environment
+      - key: deployment.environment
+        value: "production"
+        action: upsert
+
+  # Filter Processor - filter out unwanted telemetry
+  filter/exclude_internal:
+    # Exclude OTEL collector's own telemetry
+    traces:
+      span:
+        - 'attributes["url.full"] != nil and IsMatch(attributes["url.full"], ".*opentelemetry.proto.collector.*")'
+
+  # Metrics Transform Processor - transform/add labels to metrics
+  metrics_transform:
+    transforms:
+      - include: .*
+        match_type: regexp
+        action: update
+        operations:
+          # Add environment label to all metrics
+          - action: add_label
+            label: environment
+            value: production
+
+connectors:
+  # SpanMetrics Connector - generates RED metrics from spans
+  spanmetrics:
+    metrics_flush_interval: 60s
+    dimensions:
+      - name: http.method
+      - name: http.status_code
+      - name: http.target
+      - name: db.system
+      - name: db.name
+      - name: messaging.system
+      - name: messaging.destination
+      - name: peer.service
+    exclude_dimensions:
+      - http.status_code
+    resource_attributes_key: "resource.attributes"
+    dimension_metrics:
+      - spans_count
+      - spans_latency
+
+  # Service Graph Connector - generates service dependency metrics
+  servicegraph:
+    latency_histogram_buckets: [100ms, 250ms, 1s, 5s, 10s]
+    store:
+      ttl: 60s
+      max_items: 10000
+    virtual_node_peer_attributes:
+      - peer.service
+      - db.name
+      - db.system
+      - messaging.system
+      - messaging.destination
+    virtual_node_extra_label: true
+    metrics_flush_interval: 60s
+
+exporters:
+  # ========== PROMETHEUS EXPORTERS ==========
+
+  # Prometheus Remote Write - send metrics to Prometheus
+  prometheusremotewrite:
+    endpoint: http://prometheus:9090/api/v1/write
+    tls:
+      insecure: true
+    # Add custom labels
+    resource_to_telemetry_conversion:
+      enabled: true
+    # Retry configuration
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    # Send metrics in batches
+    send_queue_size: 10000
+    send_queue_shard_count: 10
+
+  # Prometheus Exporter - expose metrics for scraping
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: otel_collector
+    const_labels:
+      cluster: "monitoring-stack"
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  # ========== OPENSEARCH EXPORTERS ==========
+
+  # Data Prepper Exporter (Metrics) - send to Data Prepper for OpenSearch
+  otlp/metrics:
+    endpoint: data-prepper:21891
+    tls:
+      insecure: true
+    # Use OTLP format for metrics
+    # Data Prepper will ingest and forward to OpenSearch
+
+  # OpenSearch Direct Exporter - send metrics directly to OpenSearch
+  opensearch/metrics:
+    http:
+      endpoint: http://opensearch:9200
+      tls:
+        insecure: true
+      index: otel_metrics
+    # Document type (OpenSearch 2.x compatible)
+    #index_type: "_doc"  # Commented for OpenSearch 3.x
+    # Mapping settings
+    action:
+      name: index
+    # Batch settings
+    batch:
+      size: 1000
+      timeout: 10s
+    # Retry settings
+    retry:
+      enabled: true
+      max_retries: 5
+    # Compression
+    compression: gzip
+
+  # ========== TRACE EXPORTERS ==========
+
+  # Data Prepper Exporter (Traces) - send to Data Prepper
+  otlp/traces:
+    endpoint: data-prepper:21890
+    tls:
+      insecure: true
+      insecure_skip_verify: true
+
+  # OpenSearch Direct Exporter (Traces)
+  opensearch/traces:
+    http:
+      endpoint: http://opensearch:9200
+      tls:
+        insecure: true
+    index: jaeger-spans
+    batch:
+      size: 500
+      timeout: 5s
+
+  # Jaeger OTLP Exporter - send to Jaeger
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # ========== LOG EXPORTERS ==========
+
+  # OpenSearch Exporter (Logs)
+  opensearch/logs:
+    http:
+      endpoint: http://opensearch:9200
+      tls:
+        insecure: true
+    index: otel_logs
+    batch:
+      size: 500
+      timeout: 5s
+
+  # ========== DEBUG EXPORTER ==========
+
+  # Debug Exporter - print to console for debugging
+  debug:
+    verbosity: detailed
+    sampling_initial: 5
+    sampling_thereafter: 100
+
+service:
+  telemetry:
+    resource:
+      service.name: otel-collector
+      service.version: 0.131.0
+      service.instance.id: ${env:HOSTNAME}
+    logs:
+      level: info
+      # Set to debug for troubleshooting
+      #level: debug
+    metrics:
+      level: detailed
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+
+  # Extensions
+  extensions:
+    - health_check
+    - pprof
+    - zpages
+
+  # Pipelines
+  pipelines:
+    # ========== TRACE PIPELINE ==========
+    traces:
+      receivers: [otlp]
+      processors:
+        - batch
+        - memory_limiter
+        - resourcedetection
+        - filter/exclude_internal
+      exporters:
+        - otlp/jaeger        # To Jaeger
+        - otlp/traces       # To Data Prepper
+        - opensearch/traces # Direct to OpenSearch
+        - spanmetrics       # For metrics generation
+        - servicegraph      # For service graph
+
+    # ========== METRICS PIPELINE (Application) ==========
+    metrics/app:
+      receivers: [otlp]
+      processors:
+        - batch
+        - memory_limiter
+        - resourcedetection
+        - metrics_transform
+      exporters:
+        - prometheusremotewrite  # To Prometheus (Remote Write)
+        - otlp/metrics           # To Data Prepper → OpenSearch
+        - opensearch/metrics     # Direct to OpenSearch
+
+    # ========== METRICS PIPELINE (Host) ==========
+    metrics/host:
+      receivers: [hostmetrics, docker_stats]
+      processors:
+        - batch
+        - memory_limiter
+        - resourcedetection
+        - resource
+        - metrics_transform
+      exporters:
+        - prometheusremotewrite  # To Prometheus
+        - otlp/metrics           # To Data Prepper → OpenSearch
+        - opensearch/metrics     # Direct to OpenSearch
+        - prometheus             # For scraping
+
+    # ========== METRICS PIPELINE (Connector Generated) ==========
+    metrics/connector:
+      receivers: [spanmetrics, servicegraph]
+      processors: [batch]
+      exporters:
+        - prometheusremotewrite  # To Prometheus
+        - prometheus             # For scraping
+
+    # ========== LOGS PIPELINE ==========
+    logs:
+      receivers: [otlp]
+      processors:
+        - batch
+        - memory_limiter
+        - resourcedetection
+      exporters:
+        - opensearch/logs
+
+# ========== EXTENSIONS ==========
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+    path: /health
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679

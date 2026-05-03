@@ -1,0 +1,158 @@
+# Prometheus Configuration for Data Prepper + OTEL Collector Setup
+# Receives metrics via Remote Write and scrapes OTEL Collector
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: "monitoring-stack"
+    environment: "production"
+
+# Remote Write Configuration
+# OTEL Collector sends metrics to Prometheus via Remote Write
+remote_write:
+  - url: http://localhost:9090/api/v1/write
+    # Queue config for handling high metric volumes
+    queue_config:
+      # Number of samples to buffer per shard before blocking
+      capacity: 10000
+      # Maximum number of shards
+      max_shards: 50
+      # Minimum number of shards
+      min_shards: 1
+      # Maximum number of samples per send
+      max_samples_per_send: 5000
+      # Batch timeout
+      batch_send_deadline: 5s
+      # Minimum retry delay
+      min_backoff: 30ms
+      # Maximum retry delay
+      max_backoff: 100ms
+    # Retry configuration
+    write_relabel_configs:
+      # Drop certain metrics if needed
+      - source_labels: [__name__]
+        regex: 'go_|process_|promhttp_'
+        action: drop
+
+# Scrape configurations
+scrape_configs:
+  # ========== OTEL COLLECTOR METRICS ==========
+  - job_name: 'otel-collector'
+    static_configs:
+      - targets: ['otel-collector:8889']
+        labels:
+          service: 'otel-collector'
+          cluster: 'monitoring-stack'
+    # Scrape interval
+    scrape_interval: 10s
+    # Scrape timeout
+    scrape_timeout: 5s
+    # Metric relabeling
+    metric_relabel_configs:
+      # Add prefix to collector's own metrics
+      - source_labels: [__name__]
+        regex: '(.*)'
+        target_label: __name__
+        replacement: 'otel_collector_${1}'
+        action: replace
+
+  # ========== JAEGER METRICS ==========
+  - job_name: 'jaeger-collector'
+    static_configs:
+      - targets: ['spm_metrics_source:8888']
+        labels:
+          service: 'jaeger'
+          cluster: 'monitoring-stack'
+    scrape_interval: 15s
+    scrape_timeout: 5s
+
+  # ========== OPENSEARCH METRICS ==========
+  - job_name: 'opensearch'
+    static_configs:
+      - targets: ['opensearch:9200']
+        labels:
+          service: 'opensearch'
+          cluster: 'monitoring-stack'
+    scheme: http
+    metrics_path: '/_prometheus/metrics'
+    scrape_interval: 30s
+    scrape_timeout: 10s
+
+  # ========== DATA PREPPER METRICS ==========
+  - job_name: 'data-prepper'
+    static_configs:
+      - targets: ['data-prepper:4900']
+        labels:
+          service: 'data-prepper'
+          cluster: 'monitoring-stack'
+    scrape_interval: 15s
+    scrape_timeout: 5s
+    metrics_path: '/metrics'
+
+  # ========== NODE EXPORTER (Optional - for host metrics) ==========
+  # Uncomment if you want to add node_exporter
+  # - job_name: 'node-exporter'
+  #   static_configs:
+  #     - targets: ['node-exporter:9100']
+  #       labels:
+  #         service: 'node-exporter'
+  #   scrape_interval: 15s
+
+  # ========== CADVISOR (Optional - for container metrics) ==========
+  # Uncomment if you want to add cAdvisor
+  # - job_name: 'cadvisor'
+  #   static_configs:
+  #     - targets: ['cadvisor:8080']
+  #       labels:
+  #         service: 'cadvisor'
+  #   scrape_interval: 15s
+
+# Alerting configuration (optional)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#           - alertmanager:9093
+
+# Rule files (optional)
+# rule_files:
+#   - 'alerts/*.yml'
+
+# Storage configuration
+storage:
+  tsdb:
+    path: /prometheus
+    # Retention time
+    retention:
+      time: 30d
+      size: 10GB
+    # Out of order time window
+    out_of_order_time_window: 30m
+
+# Tracing configuration (optional)
+# tracing:
+#   endpoint: "jaeger:4318"
+#   client_type: "grpc"
+#   headers:
+#     X-Trace-Header: "value"
+
+# Features
+# enable_features:
+#   - exemplar-storage
+#   - native-histograms
+
+# Console configuration
+console:
+  # Console libraries
+  libraries:
+    - example_library
+
+# Query configuration
+query:
+  # Lookback delta
+  lookback-delta: 5m
+  # Maximum concurrency
+  max_concurrency: 20
+  # Timeout
+  timeout: 2m

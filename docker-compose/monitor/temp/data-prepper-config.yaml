@@ -1,0 +1,124 @@
+# Data Prepper Main Configuration
+# Based on /home/philip/Downloads/data-prepper-config.yaml
+
+ssl: false
+
+# Data Prepper server configuration
+data-prepper:
+  # Server settings
+  server:
+    host: 0.0.0.0
+    port: 2021
+
+  # TLS settings (disabled for local development)
+  tls:
+    enabled: false
+
+  # Authentication settings (disabled for local development)
+  authentication:
+    enabled: false
+
+  # Circuit breaker settings
+  circuit-breaker:
+    threshold: 50
+    half-open-max-consecutive-failed: 2
+    half-open-max-consecutive-success: 2
+    open-reset-timeout-ms: 60000
+    success-window-ms: 60000
+
+  # Buffer settings
+  buffer:
+    bounded_blocking:
+      buffer_size: 10240
+      batch_size: 160
+
+  # Worker settings
+  workers: 4
+  delay: 100
+
+  # Enable OpenTelemetry tracing for Data Prepper itself
+  otel_trace:
+    enabled: false
+    # exporter:
+    #   endpoint: http://localhost:4317
+    #   protocol: grpc
+
+  # Metrics configuration
+  metrics:
+    host: 0.0.0.0
+    port: 4900
+    # Expose metrics in Prometheus format
+    enable_tags: true
+
+  # Pipeline settings
+  pipeline:
+    # Thread pool settings
+    worker:
+      threads: 4
+    # Buffer settings
+    buffer:
+      type: bounded_blocking
+      max_size: 10240
+      batch_size: 160
+
+  # DLQ (Dead Letter Queue) settings
+  dlq:
+    # DLQ for failed records
+    enabled: true
+    # DLQ file path
+    file_path: /var/log/data-prepper/dlq.log
+    # Maximum file size
+    max_file_size: 10MB
+    # Maximum number of files
+    max_files: 10
+
+# Plugin-specific configurations
+plugins:
+  # OpenSearch plugin
+  opensearch:
+    # Bulk request settings
+    bulk:
+      # Maximum size of bulk request (in MB)
+      max-size: 10
+      # Maximum number of documents in bulk request
+      max-docs: 1000
+      # Timeout for bulk request
+      timeout: 60s
+
+    # Index management
+    index:
+      # Index name format
+      name: otel-%{data_type}-%{yyyy-MM-dd}
+      # Alias settings
+      alias:
+        enabled: true
+        name: otel-%{data_type}
+      # Rollover settings
+      rollover:
+        enabled: true
+        # Conditions for rollover
+        conditions:
+          max-age: 1d
+          max-size: 50gb
+          max-docs: 10000000
+
+  # OTel plugin
+  otel:
+    # Trace settings
+    trace:
+      # Raw trace index settings
+      raw:
+        index: trace-analytics-raw
+      # Service map index settings
+      service-map:
+        index: trace-analytics-service-map
+
+    # Metrics settings
+    metrics:
+      # Metrics index settings
+      index: otel_metrics
+      # Enable metrics aggregation
+      aggregation:
+        enabled: true
+        # Aggregation interval
+        interval: 60s

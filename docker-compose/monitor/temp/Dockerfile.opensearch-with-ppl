@@ -1,0 +1,16 @@
+# Dockerfile for OpenSearch with SQL/PPL plugin
+FROM opensearchproject/opensearch:3.5.0
+
+# Install SQL plugin which includes PPL support
+RUN /usr/share/opensearch/bin/opensearch-plugin install \
+    https://github.com/opensearch-project/sql-opensearch-plugin/releases/download/3.5.0.0/sql-opensearch-plugin-3.5.0.0.zip \
+    -b
+
+# Set up permissions for OpenSearch
+RUN chown -R opensearch:opensearch /usr/share/opensearch
+
+# Expose ports
+EXPOSE 9200 9300 9600
+
+# Set environment variables
+ENV "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"

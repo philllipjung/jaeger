@@ -1,0 +1,56 @@
+# Data Prepper Main Configuration - Fixed
+# Minimal configuration
+
+ssl: false
+
+# Data Prepper server configuration
+server_port: 2021
+
+# Authentication settings (disabled for local development)
+authentication:
+  enabled: false
+
+# TLS settings (disabled for local development)
+ssl: false
+
+# Circuit breaker settings
+circuit_breakers:
+  threshold: 50
+  half_open_max_consecutive_failed: 2
+  half_open_max_consecutive_success: 2
+  open_reset_timeout_ms: 60000
+  success_window_ms: 60000
+
+# Buffer settings
+buffer:
+  bounded_blocking:
+    buffer_size: 10240
+    batch_size: 160
+
+# Worker settings
+workers: 4
+delay: 100
+
+# Metrics configuration
+metrics:
+  host: 0.0.0.0
+  port: 4900
+  enable_tags: true
+
+# Pipeline settings
+pipeline:
+  worker:
+    threads: 4
+  buffer:
+    type: bounded_blocking
+    max_size: 10240
+    batch_size: 160
+
+# DLQ (Dead Letter Queue) settings
+dlq:
+  enabled: false
+
+# Processors timeout
+processor_shutdown_timeout: 30s
+sink_shutdown_timeout: 30s
+pipeline_shutdown: 30s
